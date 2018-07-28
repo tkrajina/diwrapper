@@ -20,7 +20,8 @@ type Cleaner interface {
 type InjectWrapper struct {
 	g *inject.Graph
 	// this slice is here because we want to initialize objects in the order as they are added (after the graph is generated):
-	objects []*inject.Object
+	objects    [][]*inject.Object
+	tmpObjects []*inject.Object
 }
 
 // NewDebug starts a diwrapper with debug output
@@ -33,8 +34,9 @@ func NewDebug() *InjectWrapper {
 func New() *InjectWrapper {
 	var g inject.Graph
 	return &InjectWrapper{
-		g:       &g,
-		objects: []*inject.Object{},
+		g:          &g,
+		objects:    [][]*inject.Object{},
+		tmpObjects: []*inject.Object{},
 	}
 }
 
@@ -57,7 +59,7 @@ func (i *InjectWrapper) WithObject(object interface{}) *InjectWrapper {
 	if err := i.g.Provide(o); err != nil {
 		panic(fmt.Sprintf("Error providing object %T:%s", object, err.Error()))
 	}
-	i.objects = append(i.objects, o)
+	i.tmpObjects = append(i.tmpObjects, o)
 	return i
 }
 
@@ -71,7 +73,7 @@ func (i *InjectWrapper) WithObjectOrErr(object interface{}, err error) *InjectWr
 	if err := i.g.Provide(o); err != nil {
 		panic(fmt.Sprintf("Error providing object %T:%s", object, err.Error()))
 	}
-	i.objects = append(i.objects, o)
+	i.tmpObjects = append(i.tmpObjects, o)
 	return i
 }
 
@@ -81,15 +83,31 @@ func (i *InjectWrapper) WithNamedObject(name string, obj interface{}) *InjectWra
 	if err := i.g.Provide(o); err != nil {
 		panic(fmt.Sprintf("Error providing named object %s.%T:%s", name, obj, err.Error()))
 	}
-	i.objects = append(i.objects, o)
+	i.tmpObjects = append(i.tmpObjects, o)
+	return i
+}
+
+func (i *InjectWrapper) InitAsync() *InjectWrapper {
+	i.objects = append(i.objects, i.tmpObjects)
+	i.tmpObjects = []*inject.Object{}
+	return i
+}
+
+func (i *InjectWrapper) InitSync() *InjectWrapper {
+	for _, obj := range i.tmpObjects {
+		i.objects = append(i.objects, []*inject.Object{obj})
+	}
+	i.tmpObjects = []*inject.Object{}
 	return i
 }
 
 func (i *InjectWrapper) AllObjects() []interface{} {
 	//if len(i.g.Objects()) != len(i.objects) { panic(fmt.Sprintf("Invalid objects size: %d!=%d", len(i.g.Objects()), len(i.objects))) }
 	res := []interface{}{}
-	for _, diObj := range i.objects {
-		res = append(res, diObj.Value)
+	for _, objs := range i.objects {
+		for _, o := range objs {
+			res = append(res, o.Value)
+		}
 	}
 	return res
 }
@@ -102,9 +120,11 @@ func (i InjectWrapper) MustGetNamedObject(sample interface{}, name string) inter
 	if sampleType.Kind() != reflect.Ptr {
 		panic(fmt.Sprintf("Sample must be interface, found %T", sample))
 	}
-	for _, obj := range i.objects {
-		if reflect.TypeOf(obj.Value) == sampleType && obj.Name == name {
-			return obj.Value
+	for _, objs := range i.objects {
+		for _, obj := range objs {
+			if reflect.TypeOf(obj.Value) == sampleType && obj.Name == name {
+				return obj.Value
+			}
 		}
 	}
 	panic(fmt.Sprintf("Object not found: %s.%T", name, sample))
@@ -118,9 +138,11 @@ func (i InjectWrapper) MustGetObject(sample interface{}) interface{} {
 func (i *InjectWrapper) CheckNoImplicitObjects() *InjectWrapper {
 	for _, o := range i.g.Objects() {
 		var oOK bool
-		for _, diwrapperObj := range i.objects {
-			if diwrapperObj.Value == o.Value {
-				oOK = true
+		for _, objs := range i.objects {
+			for _, obj := range objs {
+				if obj.Value == o.Value {
+					oOK = true
+				}
 			}
 		}
 		if oOK {
@@ -135,6 +157,7 @@ func (i *InjectWrapper) CheckNoImplicitObjects() *InjectWrapper {
 
 // InitializeGraphWithImplicitObjects initializes a graph allowing implicitly created objects. Those are objects not specified with one of the With...() methods.
 func (i *InjectWrapper) InitializeGraphWithImplicitObjects() *InjectWrapper {
+	i.InitSync()
 	i.log("Initializing %d objects", len(i.objects))
 
 	if err := i.g.Populate(); err != nil {
