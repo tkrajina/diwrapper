@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sync"
 
 	"github.com/facebookgo/inject"
 )
@@ -87,13 +88,21 @@ func (i *InjectWrapper) WithNamedObject(name string, obj interface{}) *InjectWra
 	return i
 }
 
+// InitAsync prepares all objects in the previous "temp" list to be initialized asynchronously
 func (i *InjectWrapper) InitAsync() *InjectWrapper {
+	if len(i.tmpObjects) == 0 {
+		return i
+	}
 	i.objects = append(i.objects, i.tmpObjects)
 	i.tmpObjects = []*inject.Object{}
 	return i
 }
 
+// InitSync prepares all objects in the previous "temp" list to be initialized synchronously
 func (i *InjectWrapper) InitSync() *InjectWrapper {
+	if len(i.tmpObjects) == 0 {
+		return i
+	}
 	for _, obj := range i.tmpObjects {
 		i.objects = append(i.objects, []*inject.Object{obj})
 	}
@@ -163,17 +172,39 @@ func (i *InjectWrapper) InitializeGraphWithImplicitObjects() *InjectWrapper {
 	if err := i.g.Populate(); err != nil {
 		panic(fmt.Sprintf("Error populating graph: %s", err))
 	}
-	for _, obj := range i.AllObjects() {
-		if initializer, is := obj.(Initializer); is {
-			i.log("Initializing %T", obj)
-			if err := initializer.Init(); err != nil {
-				panic(fmt.Sprintf("Error initializing privided object %T:%s", obj, err.Error()))
-			}
-			i.log("Initialized %T", obj)
-		}
+	for _, objs := range i.objects {
+		i.initAsync(objs)
 	}
 
 	return i
+}
+
+func (i *InjectWrapper) initAsync(objs []*inject.Object) {
+	wg := &sync.WaitGroup{}
+
+	if len(objs) > 1 {
+		list := ""
+		for _, obj := range objs {
+			list += fmt.Sprintf("%T", obj.Value)
+		}
+		i.log("Asynchronously initializing: " + list)
+	}
+
+	for _, obj := range objs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			if initializer, is := obj.Value.(Initializer); is {
+				i.log("Initializing %T", obj.Value)
+				defer i.log("Initialized %T", obj.Value)
+				if err := initializer.Init(); err != nil {
+					panic(fmt.Sprintf("Error initializing privided object %T:%s", obj, err.Error()))
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // InitializeGraph initializes a graph, but fails if an object is not specified with one of the With() methods.
